@@ -28,6 +28,8 @@
 #include <thread>
 #include "asu_transport/asu_transport.h"
 #include "asu_transport/types.h"
+#include "connection_internal.h"
+#include "debug_log.h"
 
 namespace UC::ASU {
 
@@ -35,36 +37,65 @@ AsuTransportImpl::~AsuTransportImpl() { Shutdown(); }
 
 Status AsuTransportImpl::Init(const TransportConfig& config)
 {
-    if (worker_.joinable()) { return Status::OK(); }
-
+    debug_log("AsuTransportImpl::Init", "start");
+    if (worker_.joinable()) {
+        debug_log("AsuTransportImpl::Init", "already initialized");
+        return Status::OK();
+    }
     config_ = config;
+
+    std::uint32_t qp_num =
+        config_.query_qp_num + config_.load_qp_num + config_.store_qp_num;
+    debug_log("AsuTransportImpl::Init",
+              "endpoints=" + std::to_string(config_.endpoints.size())
+              + " qp_num=" + std::to_string(qp_num));
+    for (const auto& ep : config_.endpoints) {
+        auto s = conn_manager_.AddGroup(ep, qp_num);
+        if (!s.ok()) {
+            debug_log("AsuTransportImpl::Init", "AddGroup FAILED: " + s.message);
+            return s;
+        }
+    }
+
+    conn_manager_.StartRecoverLoop();
+
     auto queue_depth =
         std::max<std::size_t>(2, static_cast<std::size_t>(config_.max_inflight_tasks));
     execute_queue_.Setup(queue_depth + 1);
     stop_.store(false, std::memory_order_release);
     worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
+    debug_log("AsuTransportImpl::Init",
+              "OK: queue_depth=" + std::to_string(queue_depth));
     return Status::OK();
 }
 
 Status AsuTransportImpl::Shutdown()
 {
-    if (!worker_.joinable()) { return Status::OK(); }
-
-    // TODO: Drain task queue and fail all pending tasks
+    debug_log("AsuTransportImpl::Shutdown", "start");
+    if (!worker_.joinable()) {
+        debug_log("AsuTransportImpl::Shutdown", "already shutdown");
+        return Status::OK();
+    }
 
     stop_.store(true, std::memory_order_release);
+    debug_log("AsuTransportImpl::Shutdown", "stopping worker thread");
     if (worker_.joinable()) { worker_.join(); }
+
+    task_manager_.DrainAll(TransportTaskState::CANCELED);
+
+    conn_manager_.StopRecoverLoop();
+    conn_manager_.Shutdown();
+    debug_log("AsuTransportImpl::Shutdown", "OK");
     return Status::OK();
 }
 
 Status AsuTransportImpl::CheckHealth()
 {
-    // TODO: real health check
     return Status::OK();
 }
 
 Status AsuTransportImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                               QueryResult& result)
+                                QueryResult& result)
 {
     TaskId task_id{kInvalidTaskId};
     auto status = QueryAsync(keys, options, task_id);
@@ -79,7 +110,7 @@ Status AsuTransportImpl::Query(const std::vector<CacheKey>& keys, const QueryOpt
 }
 
 Status AsuTransportImpl::QueryAsync(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                                    TaskId& task_id)
+                                     TaskId& task_id)
 {
     auto ctx = std::make_unique<TransportTaskContext>();
     ctx->op_type = TransportOpType::QUERY;
@@ -118,113 +149,195 @@ Status AsuTransportImpl::DeleteAsync(const std::vector<CacheKey>& keys, TaskId& 
 
 Status AsuTransportImpl::Cancel(TaskId task_id)
 {
-    return Status::Error(StatusCode::INTERNAL_ERROR, "cancel is not supported now");
+    return Status::Error(StatusCode::UNSUPPORTED, "cancel is not supported now");
 }
 
 Status AsuTransportImpl::Check(TaskId task_id, TaskResult& result)
 {
     auto ctx = task_manager_.Get(task_id);
-    if (!ctx) { return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found"); }
-
-    std::lock_guard<std::mutex> lock(ctx->wait_mu);
-    BuildResult(*ctx, result);
-    if (!ctx->Done()) {
-        result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress");
+    if (!ctx) {
+        debug_log("AsuTransportImpl::Check",
+                  "task_id=" + std::to_string(task_id) + " NOT FOUND");
+        return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found");
     }
+    std::unique_lock<std::mutex> lock(ctx->wait_mu);
+    if (!ctx->Done()) {
+        debug_log("AsuTransportImpl::Check",
+                  "task_id=" + std::to_string(task_id) + " IN_PROGRESS");
+        result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress");
+        return Status::OK();
+    }
+    debug_log("AsuTransportImpl::Check",
+              "task_id=" + std::to_string(task_id) + " DONE");
+    BuildResult(*ctx, result);
+    lock.unlock();
+    task_manager_.Remove(task_id);
     return Status::OK();
 }
 
 Status AsuTransportImpl::Wait(TaskId task_id, std::uint64_t timeout_ms, TaskResult& result)
 {
+    debug_log("AsuTransportImpl::Wait",
+              "task_id=" + std::to_string(task_id) + " timeout_ms=" + std::to_string(timeout_ms));
     auto ctx = task_manager_.Get(task_id);
-    if (!ctx) { return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found"); }
+    if (!ctx) {
+        debug_log("AsuTransportImpl::Wait",
+                  "task_id=" + std::to_string(task_id) + " NOT FOUND");
+        return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found");
+    }
 
     std::unique_lock<std::mutex> lock(ctx->wait_mu);
     const bool done = timeout_ms == 0
                           ? (ctx->cv.wait(lock, [ctx] { return ctx->Done(); }), true)
                           : ctx->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
                                              [ctx] { return ctx->Done(); });
-    BuildResult(*ctx, result);
     if (!done) {
-        result.status = Status::Error(StatusCode::TIMEOUT, "transport task wait timeout");
+        debug_log("AsuTransportImpl::Wait",
+                  "task_id=" + std::to_string(task_id) + " TIMEOUT");
+        auto prev_state = ctx->state.exchange(TransportTaskState::FAILED, std::memory_order_acq_rel);
+        if (prev_state == TransportTaskState::INFLIGHT) {
+            auto* ch = ctx->channel.load(std::memory_order_acquire);
+            if (ch) {
+                debug_log("AsuTransportImpl::Wait",
+                          "timeout: prev_state=INFLIGHT, inflight-1 on ch_id="
+                          + std::to_string(ch->channel_id));
+                ch->inflight_count.fetch_sub(1, std::memory_order_relaxed);
+            }
+            BuildResult(*ctx, result);
+            result.status = Status::Error(StatusCode::RESULT_TIMEOUT, "transport task result timeout");
+            lock.unlock();
+            task_manager_.Remove(task_id);
+            return result.status;
+        }
+        debug_log("AsuTransportImpl::Wait",
+                  "timeout: prev_state=PENDING, submit timeout (CompleteTask will CAS undo)");
+        BuildResult(*ctx, result);
+        result.status = Status::Error(StatusCode::SUBMIT_TIMEOUT, "transport task submit timeout");
+        lock.unlock();
+        task_manager_.Remove(task_id);
         return result.status;
     }
+    debug_log("AsuTransportImpl::Wait",
+              "task_id=" + std::to_string(task_id) + " DONE");
+    BuildResult(*ctx, result);
     lock.unlock();
     task_manager_.Remove(task_id);
     return Status::OK();
 }
 
 Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
-                                         std::vector<RegisterResult>& results)
+                                          std::vector<RegisterResult>& results)
 {
     results.clear();
     results.assign(regions.size(), RegisterResult{Status::OK(), kInvalidMRHandle});
-    // TODO:
     return Status::OK();
 }
 
 Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemory>& regions,
-                                               std::vector<RegisterResult>& results)
+                                                std::vector<RegisterResult>& results)
 {
     results.clear();
     results.assign(regions.size(), RegisterResult{Status::OK(), kInvalidMRHandle});
-    // TODO:
     return Status::OK();
 }
 
 Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
 {
-    // TODO:
     return Status::OK();
 }
 
 Status AsuTransportImpl::SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& task_id)
 {
+    debug_log("AsuTransportImpl::SubmitAsync",
+              "op_type=" + std::to_string(static_cast<int>(ctx->op_type)));
     auto status = task_manager_.Submit(std::move(ctx), task_id);
-    if (!status.ok()) { return status; }
+    if (!status.ok()) {
+        debug_log("AsuTransportImpl::SubmitAsync", "Submit FAILED: " + status.message);
+        return status;
+    }
 
     auto raw_ctx = task_manager_.Get(task_id);
     if (!raw_ctx) {
+        debug_log("AsuTransportImpl::SubmitAsync", "ctx disappeared after submit");
         task_id = kInvalidTaskId;
         return Status::Error(StatusCode::INTERNAL_ERROR, "transport task disappeared after submit");
     }
 
     std::lock_guard<std::mutex> lock(producer_mu_);
     if (!execute_queue_.TryPush(std::move(raw_ctx))) {
+        debug_log("AsuTransportImpl::SubmitAsync", "queue full");
         task_manager_.Remove(task_id);
         task_id = kInvalidTaskId;
         return Status::Error(StatusCode::RESOURCE_BUSY, "transport task queue is full");
     }
+    debug_log("AsuTransportImpl::SubmitAsync",
+              "OK: task_id=" + std::to_string(task_id));
     return Status::OK();
 }
 
 void AsuTransportImpl::WorkerLoop()
 {
+    debug_log("AsuTransportImpl::WorkerLoop", "started");
     execute_queue_.ConsumerLoop(stop_, [this](TransportTaskContextPtr ctx) {
         if (!ctx) { return; }
         CompleteTask(ctx);
     });
+    debug_log("AsuTransportImpl::WorkerLoop", "stopped");
 }
 
 void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
 {
-    // TODO: do REAL work here
-    TransportTaskState expected = TransportTaskState::PENDING;
-    if (!ctx->state.compare_exchange_strong(expected, TransportTaskState::INFLIGHT,
-                                            std::memory_order_acq_rel)) {
-        if (ctx->state.load(std::memory_order_acquire) == TransportTaskState::CANCELED) {
-            ctx->cv.notify_all();
+    int retries = 2;
+    ConnectionChannel* channel = conn_manager_.SelectConnection();
+    Status s;
+
+    while (retries-- > 0 && channel) {
+        if (ctx->state.load(std::memory_order_acquire) != TransportTaskState::PENDING) {
+            debug_log("AsuTransportImpl::CompleteTask",
+                      "task_id=" + std::to_string(ctx->task_id)
+                      + " state!=PENDING (Wait timeout/Cancel), undo inflight on ch_id="
+                      + std::to_string(channel->channel_id));
+            channel->inflight_count.fetch_sub(1, std::memory_order_relaxed);
+            return;
         }
-        return;
+        ctx->channel.store(channel, std::memory_order_release);
+        s = channel->StubSend(ctx.get());
+        if (s.ok()) {
+            TransportTaskState expected = TransportTaskState::PENDING;
+            if (!ctx->state.compare_exchange_strong(expected, TransportTaskState::INFLIGHT,
+                                                     std::memory_order_acq_rel)) {
+                debug_log("AsuTransportImpl::CompleteTask",
+                          "task_id=" + std::to_string(ctx->task_id)
+                          + " CAS PENDING->INFLIGHT failed (state="
+                          + std::to_string(static_cast<int>(expected))
+                          + "), undo inflight on ch_id="
+                          + std::to_string(channel->channel_id));
+                channel->inflight_count.fetch_sub(1, std::memory_order_relaxed);
+                return;
+            }
+            debug_log("AsuTransportImpl::CompleteTask",
+                      "task_id=" + std::to_string(ctx->task_id)
+                      + " Send OK + INFLIGHT on ch_id=" + std::to_string(channel->channel_id));
+            return;
+        }
+        debug_log("AsuTransportImpl::CompleteTask",
+                  "task_id=" + std::to_string(ctx->task_id)
+                  + " Send FAILED on ch_id=" + std::to_string(channel->channel_id)
+                  + " retries_left=" + std::to_string(retries));
+        channel->inflight_count.fetch_sub(1, std::memory_order_relaxed);
+        conn_manager_.ReportFailure(channel);
+        channel = conn_manager_.SelectConnection();
     }
 
-    std::lock_guard<std::mutex> lock(ctx->wait_mu);
-    if (ctx->op_type == TransportOpType::QUERY) {
-        ctx->query_result.exists.assign(ctx->keys.size, 0);
-        ctx->query_result.prefix_hit_keys = 0;
+    if (channel) {
+        channel->inflight_count.fetch_sub(1, std::memory_order_relaxed);
     }
-    ctx->final_status = Status::OK();
-    ctx->state.store(TransportTaskState::COMPLETED, std::memory_order_release);
+
+    debug_log("AsuTransportImpl::CompleteTask",
+              "task_id=" + std::to_string(ctx->task_id) + " no available channel, state->FAILED");
+    std::lock_guard<std::mutex> lock(ctx->wait_mu);
+    ctx->final_status = Status::Error(StatusCode::NO_ACTIVE_CONNECTION, "no available channel");
+    ctx->state.store(TransportTaskState::FAILED, std::memory_order_release);
     ctx->cv.notify_all();
 }
 

@@ -30,6 +30,7 @@
 #include <unordered_map>
 #include <utility>
 #include "asu_transport/types.h"
+#include "debug_log.h"
 
 namespace UC::ASU {
 
@@ -78,6 +79,20 @@ public:
             return Status::Error(StatusCode::TASK_NOT_FOUND, task_name_ + " task not found");
         }
         return Status::OK();
+    }
+
+    void DrainAll(State target_state)
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        int count = static_cast<int>(tasks_.size());
+        for (auto& [id, ctx] : tasks_) {
+            ctx->state.store(target_state, std::memory_order_release);
+            ctx->final_status = Status::Error(StatusCode::CANCELED, "transport shutdown canceled task");
+            ctx->cv.notify_all();
+        }
+        tasks_.clear();
+        debug_log("TaskManagerBase::DrainAll",
+                  "cleared " + std::to_string(count) + " tasks from " + task_name_);
     }
 
 private:

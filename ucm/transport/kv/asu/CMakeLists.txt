@@ -1,5 +1,5 @@
 file(GLOB ASU_TRANSPORT_SOURCES CONFIGURE_DEPENDS trans/src/*.cpp)
-add_library(asu_transport SHARED ${ASU_TRANSPORT_SOURCES})
+add_library(asu_transport STATIC ${ASU_TRANSPORT_SOURCES})
 target_include_directories(asu_transport
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/trans/include
@@ -8,10 +8,12 @@ target_include_directories(asu_transport
         ${CMAKE_CURRENT_SOURCE_DIR}/trans/src
         ${UCM_ROOT_DIR}/ucm/shared/infra
 )
-target_link_libraries(asu_transport PUBLIC pthread)
+if(UNIX)
+    target_link_libraries(asu_transport PUBLIC pthread)
+endif()
 
 file(GLOB ASU_CLIENT_SOURCES CONFIGURE_DEPENDS client/src/*.cpp)
-add_library(asu_client SHARED ${ASU_CLIENT_SOURCES})
+add_library(asu_client STATIC ${ASU_CLIENT_SOURCES})
 target_include_directories(asu_client
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/client/include
@@ -22,7 +24,10 @@ target_include_directories(asu_client
         ${CMAKE_CURRENT_SOURCE_DIR}/client/src
         ${UCM_ROOT_DIR}/ucm/shared/infra
 )
-target_link_libraries(asu_client PUBLIC asu_transport pthread)
+if(UNIX)
+    target_link_libraries(asu_client PUBLIC pthread)
+endif()
+target_link_libraries(asu_client PUBLIC asu_transport)
 
 if(BUILD_UNIT_TESTS)
     include(GoogleTest)

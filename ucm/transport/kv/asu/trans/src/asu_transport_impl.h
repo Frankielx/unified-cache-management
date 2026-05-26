@@ -29,6 +29,7 @@
 #include <thread>
 #include <unordered_map>
 #include "asu_transport/asu_transport.h"
+#include "connection_manager.h"
 #include "template/spsc_ring_queue.h"
 #include "transport_task_manager.h"
 
@@ -73,6 +74,7 @@ private:
 
     TransportConfig config_;
 
+    ConnectionManager conn_manager_;
     TransportTaskManager task_manager_;
     // TODO: optimize spsc pattern or just submit to RDMA/UB directly ?
     UC::SpscRingQueue<TransportTaskContextPtr> execute_queue_;
