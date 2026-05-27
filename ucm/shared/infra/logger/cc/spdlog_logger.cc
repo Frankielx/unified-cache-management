@@ -44,7 +44,7 @@ static spdlog::level::level_enum SpdLevels[] = {spdlog::level::debug, spdlog::le
 
 void Logger::Log(Level&& lv, SourceLocation&& loc, std::string&& msg)
 {
-    auto level = SpdLevels[fmt::underlying(lv)];
+    auto level = SpdLevels[static_cast<int>(lv)];
     this->logger_ = this->Make();
     this->logger_->log(spdlog::source_loc{loc.file, loc.line, loc.func}, level, std::move(msg));
 }
@@ -174,7 +174,7 @@ void Logger::Flush()
 
 bool Logger::IsEnabledFor(Level lv)
 {
-    auto level = SpdLevels[fmt::underlying(lv)];
+    auto level = SpdLevels[static_cast<int>(lv)];
     if (this->logger_) { return this->logger_->should_log(level); }
     return false;
 }

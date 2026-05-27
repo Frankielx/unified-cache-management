@@ -32,10 +32,14 @@
 #include <unordered_map>
 #include <vector>
 #include "asu_transport/asu_transport.h"
+#include "connection_manager.h"
 #include "template/spsc_ring_queue.h"
+#include "trans_provider.h"
 #include "transport_task_manager.h"
 
 namespace UC::ASU {
+
+using TransportTaskContextPtr = std::shared_ptr<TransportTaskContext>;
 
 class AsuTransportImpl final : public AsuTransport {
 public:
@@ -69,16 +73,17 @@ public:
     Status UnregisterRegions(const std::vector<MRHandle>& handles) override;
 
 private:
-    using TransportTaskContextPtr = std::shared_ptr<TransportTaskContext>;
     Status SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& taskId);
     void WorkerLoop();
     void CompleteTask(const TransportTaskContextPtr& ctx);
+
     void BuildResult(const TransportTaskContext& ctx, TaskResult& result);
 
     TransportConfig config_;
 
+    std::unique_ptr<TransProvider> transProvider_;
+    std::unique_ptr<ConnectionManager> connManager_;
     TransportTaskManager taskManager_;
-    // TODO: optimize spsc pattern or just submit to RDMA/UB directly ?
     UC::SpscRingQueue<TransportTaskContextPtr> executeQueue_;
     std::mutex producerMu_;
 

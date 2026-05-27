@@ -26,8 +26,11 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include "aicpu_trans_provider.h"
 #include "asu_transport/asu_transport.h"
 #include "asu_transport/types.h"
+#include "connection_internal.h"
+#include "logger.h"
 #include "transport_config_parser.h"
 
 namespace UC::ASU {
@@ -44,13 +47,68 @@ Status AsuTransportImpl::Init(const std::string& configPath)
 
 Status AsuTransportImpl::Init(const TransportConfig& config)
 {
-    if (worker_.joinable()) { return Status::OK(); }
-
+    UC_DEBUG("AsuTransportImpl::Init start");
+    if (worker_.joinable()) {
+        UC_DEBUG("AsuTransportImpl::Init already initialized");
+        return Status::OK();
+    }
     config_ = config;
+
+    std::string kernelJsonPath;
+    auto kit = config_.attrs.find("kernelJsonPath");
+    if (kit != config_.attrs.end()) { kernelJsonPath = kit->second; }
+
+    transProvider_ = std::make_unique<AICPUTransProvider>(kernelJsonPath);
+
+    connManager_ = std::make_unique<ConnectionManager>(
+        [this](const AsuEndpoint& ep, std::uint32_t num) -> std::vector<ConnectionHandle> {
+            std::string localIp;
+            auto it = config_.attrs.find("localIp");
+            if (it != config_.attrs.end()) { localIp = it->second; }
+
+            std::uint32_t timeout = 5000;
+            auto tit = config_.attrs.find("timeout");
+            if (tit != config_.attrs.end()) {
+                timeout = static_cast<std::uint32_t>(std::stoul(tit->second));
+            }
+
+            std::vector<TransProvider::ConnectionHandle> handles;
+            auto status = transProvider_->CreateConnection(
+                localIp, ep.ip, ep.port, num, timeout, handles);
+
+            if (!status.ok()) {
+                UC_ERROR("CreateConnection failed: {}", status.message);
+                return {};
+            }
+
+            std::vector<ConnectionHandle> result;
+            result.reserve(handles.size());
+            for (auto& handle : handles) {
+                result.push_back(handle);
+            }
+            return result;
+        },
+        [this](ConnectionHandle handle) {
+            transProvider_->DeleteConnections({handle});
+        });
+
+    std::uint32_t qp_num = config_.queryQpNum + config_.loadQpNum + config_.storeQpNum;
+    UC_DEBUG("AsuTransportImpl::Init endpoints={} qp_num={}", config_.endpoints.size(), qp_num);
+    for (const auto& ep : config_.endpoints) {
+        auto s = connManager_->AddGroup(ep, qp_num);
+        if (!s.ok()) {
+            UC_DEBUG("AsuTransportImpl::Init AddGroup FAILED: {}", s.message);
+            return s;
+        }
+    }
+
+    connManager_->StartRecoverLoop();
+
     auto queueDepth = std::max<std::size_t>(2, static_cast<std::size_t>(config_.maxInflightTasks));
     executeQueue_.Setup(queueDepth + 1);
     stop_.store(false, std::memory_order_release);
     worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
+    UC_DEBUG("AsuTransportImpl::Init OK: queueDepth={}", queueDepth);
     return Status::OK();
 }
 
@@ -68,10 +126,17 @@ Status AsuTransportImpl::Shutdown()
     }
 
     stop_.store(true, std::memory_order_release);
+    UC_DEBUG("AsuTransportImpl::Shutdown stopping worker thread");
     if (worker_.joinable()) { worker_.join(); }
     for (const auto& ctx : taskManager_.GetAll()) {
         if (ctx != nullptr) { (void)taskManager_.Remove(ctx->taskId); }
     }
+    if (connManager_) {
+        connManager_->Shutdown();
+        connManager_.reset();
+    }
+
+    UC_DEBUG("AsuTransportImpl::Shutdown OK");
     return Status::OK();
 }
 

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <vector>
 #include "asu_transport/types.h"
@@ -77,17 +78,14 @@ struct TransportTaskContext {
     std::mutex waitMu;
     std::condition_variable cv;
 
-    bool Done() const
-    {
-        auto s = state.load(std::memory_order_acquire);
-        return s == TransportTaskState::COMPLETED || s == TransportTaskState::FAILED ||
-               s == TransportTaskState::CANCELED;
-    }
+    bool Done() const;
 };
 
 class TransportTaskManager : public TaskManagerBase<TransportTaskContext, TransportTaskState> {
 public:
     TransportTaskManager() : TaskManagerBase(TransportTaskState::PENDING, "transport") {}
+
+    void Shutdown();
 };
 
 }  // namespace UC::ASU
