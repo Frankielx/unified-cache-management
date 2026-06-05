@@ -48,23 +48,20 @@ class ConnectionGroup;
 
 class ConnectionManager {
 public:
-    ConnectionManager();
-    ~ConnectionManager();
-
     using CreateConnectionFunc =
         std::function<std::vector<ConnectionHandle>(const AsuEndpoint&, std::uint32_t)>;
-    using DeleteConnectionsFunc =
-        std::function<std::vector<Status>(const std::vector<ConnectionHandle>&)>;
+    using DeleteConnectionFunc = std::function<void(ConnectionHandle)>;
 
-    void SetConnectionOps(CreateConnectionFunc create_fn, DeleteConnectionsFunc delete_fn);
+    ConnectionManager(CreateConnectionFunc create_fn, DeleteConnectionFunc delete_fn);
+    ~ConnectionManager();
 
     Status AddGroup(const AsuEndpoint& endpoint, std::uint32_t qp_num);
     Status Shutdown();
 
-    ConnectionChannel*
+    std::shared_ptr<ConnectionChannel>
     SelectConnection();  // the current implementation does not support concurrent calls
     void SetRoutingPolicy(RoutingPolicy policy);
-    void ReportFailure(ConnectionChannel* channel);
+    void ReportFailure(const std::shared_ptr<ConnectionChannel>& channel);
 
     void StartRecoverLoop();
     void StopRecoverLoop();
@@ -77,7 +74,7 @@ private:
 
     // Flat cache for fast channel selection (rebuilt on structure change)
     // Only accessed by Worker thread — no lock needed
-    std::vector<ConnectionChannel*> channelCache_;
+    std::vector<std::shared_ptr<ConnectionChannel>> channelCache_;
     std::atomic<bool> cacheDirty_{false};
 
     std::atomic<bool> shuttingDown_{false};
@@ -86,22 +83,21 @@ private:
     RoutingPolicy routingPolicy_{RoutingPolicy::ROUND_ROBIN};
     static constexpr std::uint32_t kMaxInflightPerChannel = 256;
     static constexpr std::uint32_t kFailureThreshold = 2;
-    static constexpr std::uint64_t kDrainTimeoutMs = 30000;
     static constexpr std::uint64_t kRecoverIntervalMs = 100;
 
     std::thread recoverWorker_;
     std::atomic<bool> stopRecover_{false};
 
     std::shared_mutex drainMu_;
-    std::vector<ConnectionChannel*> drainList_;
+    std::vector<std::shared_ptr<ConnectionChannel>> drainList_;
 
     CreateConnectionFunc createFn_;
-    DeleteConnectionsFunc deleteFn_;
+    DeleteConnectionFunc deleteFn_;
 
     void RecoverLoop();
     void RebuildChannelCache();
-    ConnectionChannel* SelectByRoundRobin();
-    ConnectionChannel* SelectByLeastLoaded();
+    std::shared_ptr<ConnectionChannel> SelectByRoundRobin();
+    std::shared_ptr<ConnectionChannel> SelectByLeastLoaded();
 };
 
 }  // namespace UC::ASU
