@@ -9,6 +9,13 @@
 
 namespace UC::ASU {
 
+namespace {
+AICPUTransProviderSendHook g_sendHook = nullptr;
+}  // namespace
+
+void SetAICPUTransProviderSendHook(AICPUTransProviderSendHook hook) { g_sendHook = hook; }
+AICPUTransProviderSendHook GetAICPUTransProviderSendHook() { return g_sendHook; }
+
 AICPUTransProvider::AICPUTransProvider(const std::string& kernelJsonPath,
                                        const std::string& ipMapPath)
     : ipMapPath_(ipMapPath)
@@ -259,6 +266,8 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
 std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioBatches,
                                              uint32_t kernelCount, uint32_t quietCount)
 {
+    if (g_sendHook) { return g_sendHook(ioBatches, kernelCount, quietCount); }
+
     (void)kernelCount;
     (void)quietCount;
 

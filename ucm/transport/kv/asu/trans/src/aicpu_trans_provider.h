@@ -12,6 +12,13 @@
 
 namespace UC::ASU {
 
+using AICPUTransProviderSendHook =
+    std::vector<Status> (*)(const std::vector<TransProvider::SendIoBatch>& ioBatches,
+                            uint32_t kernelCount, uint32_t quietCount);
+
+void SetAICPUTransProviderSendHook(AICPUTransProviderSendHook hook);
+AICPUTransProviderSendHook GetAICPUTransProviderSendHook();
+
 class AICPUTransProvider : public TransProvider {
 public:
     explicit AICPUTransProvider(const std::string& kernelJsonPath = "",
