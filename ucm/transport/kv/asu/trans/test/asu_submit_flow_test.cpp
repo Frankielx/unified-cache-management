@@ -64,9 +64,11 @@ public:
         return std::vector<Status>(ioBatches.size(), Status::OK());
     }
 
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
-                          std::vector<MemHandle>&) override
+    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& descs,
+                          std::vector<MemHandle>& handles) override
     {
+        handles.clear();
+        handles.resize(descs.size(), reinterpret_cast<MemHandle>(0x1234));
         return Status::OK();
     }
 

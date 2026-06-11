@@ -29,12 +29,44 @@ if(NOT ASU_ASCENDCL_LIB)
     message(FATAL_ERROR "Cannot find libascendcl under ASCEND_ROOT=${ASCEND_ROOT}")
 endif()
 
+find_library(ASU_HCOMM_LIB
+    NAMES hcomm
+    HINTS
+        ${ASCEND_ROOT}
+    PATH_SUFFIXES
+        lib64
+        aarch64-linux/lib64
+)
+if(NOT ASU_HCOMM_LIB)
+    message(WARNING "Cannot find libhcomm under ASCEND_ROOT=${ASCEND_ROOT}")
+endif()
+
+find_path(ASU_ASCEND_ARCH_INCLUDE_DIR
+    NAMES hcomm/hcomm_res_defs.h
+    HINTS
+        ${ASCEND_ROOT}
+    PATH_SUFFIXES
+        aarch64-linux/include
+        arm64-linux/include
+)
+if(NOT ASU_ASCEND_ARCH_INCLUDE_DIR)
+    message(WARNING "Cannot find hcomm/hcomm_res_defs.h under ASCEND_ROOT=${ASCEND_ROOT}")
+endif()
+
 message(STATUS "ASU ASCEND include: ${ASU_ASCEND_INCLUDE_DIR}")
+message(STATUS "ASU ASCEND arch include: ${ASU_ASCEND_ARCH_INCLUDE_DIR}")
 message(STATUS "ASU ASCENDCL lib: ${ASU_ASCENDCL_LIB}")
+message(STATUS "ASU HCOMM lib: ${ASU_HCOMM_LIB}")
 
 add_library(asu_ascend_deps INTERFACE)
-target_include_directories(asu_ascend_deps INTERFACE ${ASU_ASCEND_INCLUDE_DIR})
-target_link_libraries(asu_ascend_deps INTERFACE ${ASU_ASCENDCL_LIB})
+target_include_directories(asu_ascend_deps INTERFACE
+    ${ASU_ASCEND_INCLUDE_DIR}
+    $<$<BOOL:${ASU_ASCEND_ARCH_INCLUDE_DIR}>:${ASU_ASCEND_ARCH_INCLUDE_DIR}>
+)
+target_link_libraries(asu_ascend_deps INTERFACE
+    ${ASU_ASCENDCL_LIB}
+    $<$<BOOL:${ASU_HCOMM_LIB}>:${ASU_HCOMM_LIB}>
+)
 
 file(GLOB ASU_COMMON_SOURCES CONFIGURE_DEPENDS common/*.cpp)
 file(GLOB ASU_TRANSPORT_SOURCES CONFIGURE_DEPENDS trans/src/*.cpp)
@@ -106,7 +138,28 @@ if(BUILD_UNIT_TESTS)
     )
     target_link_libraries(asu.test PRIVATE
         asu_client
+        asu_ascend_deps
         gtest_main gtest
     )
     gtest_discover_tests(asu.test)
+endif()
+
+option(BUILD_PROVIDER_DEMO "Build AICPUTransProvider demo" OFF)
+if(BUILD_PROVIDER_DEMO)
+    add_executable(aicpu_send_with_provider test/demo/aicpu_send_with_provider.cc)
+    target_include_directories(aicpu_send_with_provider PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/trans/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/trans/src
+        ${UCM_ROOT_DIR}/ucm/shared/infra
+        ${UCM_ROOT_DIR}/ucm/shared/infra/logger
+        ${UCM_ROOT_DIR}/ucm/shared/infra/logger/cc
+        ${UCM_ROOT_DIR}/ucm/shared/infra/status
+        ${UCM_ROOT_DIR}/ucm/shared
+    )
+    target_compile_definitions(aicpu_send_with_provider PRIVATE SPDLOG_FMT_EXTERNAL)
+    target_link_libraries(aicpu_send_with_provider PRIVATE
+        asu_transport
+        asu_ascend_deps
+        pthread
+    )
 endif()

@@ -56,9 +56,11 @@ public:
     {
         return {};
     }
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
-                          std::vector<MemHandle>&) override
+    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& descs,
+                          std::vector<MemHandle>& handles) override
     {
+        handles.clear();
+        handles.resize(descs.size(), reinterpret_cast<MemHandle>(0x1234));
         return Status::OK();
     }
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>&) override
