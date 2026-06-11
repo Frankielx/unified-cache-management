@@ -28,6 +28,8 @@ public:
         void* sendBuffer;
         void* flagBuffer;
         uint64_t len;
+        uint64_t remoteMailboxAddr = 0;
+        uint64_t remoteMailboxSize = 0;
     };
 
     virtual std::vector<Status> Send(const std::vector<SendIoBatch>& ioBatches,
