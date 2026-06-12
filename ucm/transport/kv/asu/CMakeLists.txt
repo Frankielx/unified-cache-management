@@ -162,4 +162,21 @@ if(BUILD_PROVIDER_DEMO)
         asu_ascend_deps
         pthread
     )
+
+    add_executable(aicpu_multi_channel_demo test/demo/aicpu_multi_channel_demo.cc)
+    target_include_directories(aicpu_multi_channel_demo PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/trans/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/trans/src
+        ${UCM_ROOT_DIR}/ucm/shared/infra
+        ${UCM_ROOT_DIR}/ucm/shared/infra/logger
+        ${UCM_ROOT_DIR}/ucm/shared/infra/logger/cc
+        ${UCM_ROOT_DIR}/ucm/shared/infra/status
+        ${UCM_ROOT_DIR}/ucm/shared
+    )
+    target_compile_definitions(aicpu_multi_channel_demo PRIVATE SPDLOG_FMT_EXTERNAL)
+    target_link_libraries(aicpu_multi_channel_demo PRIVATE
+        asu_transport
+        asu_ascend_deps
+        pthread
+    )
 endif()

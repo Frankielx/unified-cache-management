@@ -79,6 +79,7 @@ private:
         aclrtStream stream{nullptr};
         std::string remoteIp;
         uint16_t remotePort;
+        uint32_t channelIndex;
     };
 
     struct ImportedMemInfo {

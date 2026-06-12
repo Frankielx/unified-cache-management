@@ -1,7 +1,10 @@
 #include "aicpu_trans_provider.h"
 #include <arpa/inet.h>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include "hcomm/hcomm_primitives.h"
 #include "hcomm/hcomm_res.h"
 #include "hcomm/hcomm_res_defs.h"
@@ -10,6 +13,37 @@
 namespace UC::ASU {
 
 namespace {
+
+constexpr uint32_t kMaxChannelIndex = 4096U;
+
+class ChannelIndexPool {
+public:
+    bool Acquire(uint32_t& outIndex) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (usedSet_.size() >= kMaxChannelIndex) {
+            return false;
+        }
+        while (usedSet_.count(nextIndex_)) {
+            nextIndex_ = (nextIndex_ + 1) % kMaxChannelIndex;
+        }
+        outIndex = nextIndex_;
+        usedSet_.insert(outIndex);
+        nextIndex_ = (nextIndex_ + 1) % kMaxChannelIndex;
+        return true;
+    }
+
+    void Release(uint32_t index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        usedSet_.erase(index);
+    }
+
+private:
+    std::mutex mutex_;
+    std::set<uint32_t> usedSet_;
+    uint32_t nextIndex_{0U};
+};
+
+ChannelIndexPool g_channelIndexPool;
 AICPUTransProviderSendHook g_sendHook = nullptr;
 }  // namespace
 
@@ -186,9 +220,18 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
         HcommChannelDescInit(&channelDesc, 1);
         channelDesc.remoteEndpoint = remoteDesc;
         channelDesc.port = static_cast<uint16_t>(port);
-        channelDesc.notifyNum = 0;  // AICPU_TS 不需要 notify
+        channelDesc.notifyNum = 0;
         channelDesc.role = HCOMM_SOCKET_ROLE_RESERVED;
-        channelDesc.exchangeAllMems = true;  // 交换所有注册的内存
+        channelDesc.exchangeAllMems = true;
+        uint32_t channelIndex = 0;
+        if (!g_channelIndexPool.Acquire(channelIndex)) {
+            UC_ERROR("AICPUTransProvider::CreateConnection: channel index pool exhausted (max={})", kMaxChannelIndex);
+            delete ctx;
+            ReleaseEndpoint(localIp);
+            return Status::Error(StatusCode::INTERNAL_ERROR, "channel index pool exhausted");
+        }
+        ctx->channelIndex = channelIndex;
+        *reinterpret_cast<uint32_t*>(channelDesc.raws + sizeof(channelDesc.raws) - sizeof(uint32_t)) = channelIndex;
 
         int32_t ret =
             HcommChannelCreate(endpoint, COMM_ENGINE_AICPU_TS, &channelDesc, 1, &ctx->channel);
@@ -253,6 +296,8 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
             HcommChannelDestroy(&ctx->channel, 1);
             ctx->channel = 0;
         }
+
+        g_channelIndexPool.Release(ctx->channelIndex);
 
         ReleaseEndpoint(ctx->localIp);
         delete ctx;
